@@ -1,3 +1,6 @@
+> **Writeup by [@Certifa](https://github.com/Certifa)**
+> 🗓️ HTB Machine: *Cicada* • 🧠 Difficulty: Easy • 🐧 Linux
+
 # 🧠 HackTheBox - Cicada Walkthrough
 
 ![Logo](docs/logo.png)
