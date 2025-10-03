@@ -14,3 +14,8 @@ Each folder includes:
 
 ## 🔍 Structure
 
+| Machine      | Difficulty | GitHub                                   | Medium                                       |
+|--------------|------------|-------------------------------------------|----------------------------------------------|
+| Cicada       | Easy       | [GitHub](./Cicada/README.md)             | [Medium](https://medium.com/@certifa/cicada) |
+| Expressway   | Easy       | [GitHub](./Expressway/README.md)         | [Medium](https://medium.com/@certifa/expressway) |
+
