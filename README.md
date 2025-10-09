@@ -10,12 +10,4 @@ Each folder includes:
 
 ⚠️ These writeups are for **educational purposes only**. Boxes were solved in a legal environment (HTB labs with user access).
 
----
-
-## 🔍 Structure
-
-| Machine      | Difficulty | GitHub                                   | Medium                                       |
-|--------------|------------|-------------------------------------------|----------------------------------------------|
-| Cicada       | Easy       | [GitHub](./Cicada/README.md)             | [Medium](https://medium.com/@certifa/cicada) |
-| Expressway   | Easy       | [GitHub](./Expressway/README.md)         | [Medium](https://medium.com/@certifa/expressway) |
 
