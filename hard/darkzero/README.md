@@ -1,5 +1,6 @@
 > **Writeup by [@Certifa](https://github.com/Certifa)**
-> 🗓️ HTB Machine: *DarkZero* • 🧠 Difficulty: Hard • 🐧 Windows
+> 🗓️ HTB Machine: *DarkZero* • 🧠 Difficulty: Hard • 🪟
+ Windows
 
 # 🧠 HackTheBox - DarkZero Walkthrough
 
@@ -10,19 +11,19 @@
 ## 📚 Table of Contents
 - [🧠 HackTheBox - DarkZero Walkthrough](#-hackthebox---darkzero-walkthrough)
   - [📚 Table of Contents](#-table-of-contents)
-  - [Overview](#overview)
-  - [About](#about)
-  - [TL;DR](#tldr)
-  - [SETUP / NOTES](#setup--notes)
-  - [RECON](#recon)
-  - [ENUMERATION](#enumeration)
-  - [EXPLOIT](#exploit)
-  - [PRIVILEGE ESCALATION](#privilege-escalation)
-  - [Final thoughts](#final-thoughts)
-  - [LESSONS LEARNED](#lessons-learned)
-  - [REFERENCES](#references)
+  - [🔎 Overview](#-overview)
+  - [📖 About](#-about)
+  - [⚡ TL;DR](#-tldr)
+  - [🖥️ SETUP / NOTES](#️-setup--notes)
+  - [🚀 RECON](#-recon)
+  - [🔍 ENUMERATION](#-enumeration)
+  - [💥 EXPLOIT](#-exploit)
+  - [🛡️ PRIVILEGE ESCALATION](#️-privilege-escalation)
+  - [📎 Final thoughts](#-final-thoughts)
+  - [📘 LESSONS LEARNED](#-lessons-learned)
+  - [📚 REFERENCES](#-references)
 
-##  Overview
+## 🔎 Overview
 
 **Machine: DarkZero**
 
@@ -36,12 +37,12 @@
 
 ---
 
-## About
+## 📖 About
 This walkthrough covers the HackTheBox machine ‘DarkZero’, a Windows Active Directory environment. The box is notable for its focus on unintended attack paths and challenges you to deeply understand Kerberos, MS SQL, and advanced privilege escalation. The approach here is methodical, explaining each major step and rationale.
 
 ---
 
-##  TL;DR
+## ⚡ TL;DR
 
 Initial access via HTB-provided credentials for john.w / RFulUtONCOL!
 
@@ -55,7 +56,7 @@ Privilege escalation using winPEAS; identified vulnerable kernel32.dll (CVE-2024
 
 Exploited the kernel bug for SYSTEM privileges; dumped Administrator creds and used Golden Ticket techniques to obtain root.txt
 
-##  SETUP / NOTES
+## 🖥️ SETUP / NOTES
 
 Credentials: john.w / RFulUtONCOL!
 
@@ -72,7 +73,7 @@ Local privilege escalation exploitation requires an existing Meterpreter session
 
 ---
 
-##  RECON
+## 🚀 RECON
 Starting off, HackTheBox already gave us the user:pass `john.w / RFulUtONCOL!`, so let's save that somehwere.
 
 Now, let's run a `nmap` scan.
@@ -169,7 +170,7 @@ Key findings:
 
 ---
 
-##  ENUMERATION
+## 🔍 ENUMERATION
 With the information we have we can check some basic things first. We can run tools like `crackmapexec`, run `bloodhound` and many more.
 
 I checked for accessible shares with crackmapexec:
@@ -240,7 +241,7 @@ Now we hopped on `DC02`. Enumerating dc02 we found nothing very usefull. Nothing
 
 ---
 
-##  EXPLOIT
+## 💥 EXPLOIT
 
 We know enough information to try to create a `reverse shell` with `msfvenom` and send it over to the host as `dc02` with as listener being on `msfconsole`. The shell will be generated as a executable `.exe` so we can run it from `dc02` with `xp_cmdshell` so it will be triggerd.
 
@@ -365,7 +366,7 @@ We have found `user.txt`!
 
 ---
 
-##  PRIVILEGE ESCALATION
+## 🛡️ PRIVILEGE ESCALATION
 
 For privesc we will try to catch a **ticket** and use that to impersonate to login as Admin eventually.
 
@@ -462,26 +463,26 @@ And after you logged in, as you can see we checked with `whoami` our privileges,
 
 ---
 
-##  Final thoughts
+## 📎 Final thoughts
 
 DarkZero is a fantastic test of advanced Windows exploitation. It pushed me to combine enumeration, privilege escalation, pass-the-hash, and persistence techniques. This challenge deepened my understanding of the Kerberos ticketing process, and the importance of monitoring and securing AD environments against these post-exploitation tactics.
 
 ---
 
-##  LESSONS LEARNED
-Active Directory attacks often require chaining multiple techniques: lateral movement, Kerberos abuse, hash extraction.
+## 📘 LESSONS LEARNED
+- Active Directory attacks often require chaining multiple techniques: lateral movement, Kerberos abuse, hash extraction.
 
-Time synchronization is absolutely critical for Kerberos-based exploits.
+- Time synchronization is absolutely critical for Kerberos-based exploits.
 
-Golden Ticket attacks demonstrate how dangerous it is if krbtgt keys are leaked.
+- Golden Ticket attacks demonstrate how dangerous it is if krbtgt keys are leaked.
 
-Always enumerate thoroughly—unexpected clues (like a secondary domain) can change your attack chain.
+- Always enumerate thoroughly—unexpected clues (like a secondary domain) can change your attack chain.
 
-Tools like BloodHound and winPEAS are invaluable for visibility.
+- Tools like BloodHound and winPEAS are invaluable for visibility.
 
 ---
 
-##  REFERENCES
+## 📚 REFERENCES
 PetitPotam: https://github.com/topotam/PetitPotam
 
 Rubeus: https://github.com/GhostPack/Rubeus
