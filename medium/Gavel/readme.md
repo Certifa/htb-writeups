@@ -33,7 +33,6 @@
   - [🛡️ PRIVILEGE ESCALATION](#️-privilege-escalation)
     - [Step 1 – Fixing php.ini to unlock system()](#step-1--fixing-phpini-to-unlock-system)
     - [Step 2 – Creating a SUID root bash](#step-2--creating-a-suid-root-bash)
-  - [](#)
   - [📎 Final thoughts](#-final-thoughts)
   - [📘 LESSONS LEARNED](#-lessons-learned)
   - [📚 REFERENCES](#-references)
