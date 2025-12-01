@@ -239,6 +239,7 @@ You now have a reverse shell as the www-data user (the web server process). From
 - `su auctioneer`
 
 ![user](docs/user.png)
+
 We got user!
 
 ---
@@ -332,6 +333,7 @@ From there you can basically
 - `cat /root/root.txt`
 
 ![pwned](docs/pwned.png)
+
 ---
 
 ## 📎 Final thoughts
