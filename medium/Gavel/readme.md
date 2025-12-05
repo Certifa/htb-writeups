@@ -33,7 +33,6 @@
   - [🛡️ PRIVILEGE ESCALATION](#️-privilege-escalation)
     - [Step 1 – Fixing php.ini to unlock system()](#step-1--fixing-phpini-to-unlock-system)
     - [Step 2 – Creating a SUID root bash](#step-2--creating-a-suid-root-bash)
-  - [](#)
   - [📎 Final thoughts](#-final-thoughts)
   - [📘 LESSONS LEARNED](#-lessons-learned)
   - [📚 REFERENCES](#-references)
@@ -249,6 +248,7 @@ You now have a reverse shell as the www-data user (the web server process). From
 - `su auctioneer`
 
 ![user](docs/user.png)
+
 We got user!
 
 ---
@@ -342,6 +342,7 @@ From there you can basically
 - `cat /root/root.txt`
 
 ![pwned](docs/pwned.png)
+
 ---
 
 ## 📎 Final thoughts
@@ -377,3 +378,5 @@ These resources are useful if you want to dive deeper into the concepts used in 
 - [Linux privilege escalation basics](https://delinea.com/blog/linux-privilege-escalation) and common patterns such as abusing misconfigured services and SUID binaries.
 - Background reading on [remote code execution](https://www.vaadata.com/blog/rce-remote-code-execution-exploitations-and-security-tips/) in web applications and why features like dynamic “rules” are dangerous when not sandboxed properly.
 - [My own tooling and writeups](https://github.com/Certifa) (including nmapfullscan and other HTB content) on GitHub, which I also used during this engagement.
+- [SQLi Injection in PDO'S](https://slcyber.io/research-center/a-novel-technique-for-sql-injection-in-pdos-prepared-statements/)
+- [More information about the flaw](https://gbhackers.com/php-pdo-flaw/)
