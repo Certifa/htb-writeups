@@ -164,18 +164,27 @@ Let's break down what's happening here, piece by piece:
 
 **The Payload Anatomy:**
 
-```txt
-user_id=x` — We start by closing the expected identifier with a backtick. The x` is just a placeholder column name that we'll use later in our subquery.
 ```
+user_id=x`
 ```
-+FROM+(SELECT+CONCAT(username,0x3a,password)+AS+%27x+from+users)y; Here's where the magic happens. We inject a subquery that pulls username and password from the users table, concatenating them with a colon (0x3a is the hex code for :). The %27 is a URL-encoded single quote ('), which helps the alias work correctly within the SQL syntax. We alias this result as 'x so it matches our structure.
+- We start by closing the expected identifier with a backtick. The x` is just a placeholder column name that we'll use later in our subquery.
+
 ```
++FROM+(SELECT+CONCAT(username,0x3a,password)+AS+%27x+from+users)y;
 ```
---+- — This is an SQL comment sequence. The -- starts the comment, and +- acts as padding/spacing to ensure the comment properly terminates the rest of the original query.
+- Here's where the magic happens. We inject a subquery that pulls username and password from the users table, concatenating them with a colon (0x3a is the hex code for :). The %27 is a URL-encoded single quote ('), which helps the alias work correctly within the SQL syntax. We alias this result as 'x so it matches our structure.
+
+
 ```
+--+-
 ```
-&sort=\?;--+-%00 — The sort parameter adds additional confusion to the parser. The backslash escapes the question mark, the --+- comments out anything trailing, and %00 (null byte) can bypass certain parser quirks or WAF filters.
+- This is an SQL comment sequence. The -- starts the comment, and +- acts as padding/spacing to ensure the comment properly terminates the rest of the original query.
+
 ```
+&sort=\?;--+-%00
+```
+- The sort parameter adds additional confusion to the parser. The backslash escapes the question mark, the --+- comments out anything trailing, and %00 (null byte) can bypass certain parser quirks or WAF filters.
+
 ### Why This Works:
 
 
