@@ -8,7 +8,7 @@
 | Field | Value |
 |-------|-------|
 | **Name** | Pirate |
-| **OS** | Windows Server 2019 |
+| **OS** | Windows |
 | **Difficulty** | Hard |
 | **Domain** | pirate.htb |
 | **DC** | DC01.pirate.htb |
